@@ -3,97 +3,137 @@
 ## Goal
 
 Run [jmfederico/pi-web](https://github.com/jmfederico/pi-web) on this TrueNAS box as a
-custom app, from a **locally built** image (no registry). The image must carry **mise
-(used via shims)** plus a suite of standard dev tools so agents inside pi-web sessions
-have a usable toolchain.
+custom app, from a **locally built** image (no registry). The image carries **mise, used
+via shims**, plus the standard tools from `mise.toml`. Runtime tool installs and
+`mise self-update` must survive the container being recreated.
 
-Deliverables in this repo: `Dockerfile`, `image/mise-wrapper`, `mise.toml`,
-`compose.yaml` (the paste-ready TrueNAS custom-app YAML), `README.md`, `.dockerignore`,
-`.gitignore`. No app is started here — build/deploy is yours.
+Deliverables in this repo: `Dockerfile`, `image/pi-web-entrypoint`, `mise.toml`,
+`compose.yaml` (paste-ready TrueNAS custom-app YAML), `README.md`, `.dockerignore`,
+`.gitignore`. I build nothing here and start nothing — build/deploy is yours.
+
+Answers locked in: state at `/mnt/skinner/apps-pi-web:/data` (you create it), **no code
+mounts**, `mise.toml` tool list unchanged, Node bumped to the newest version that works.
 
 ## What I verified
 
-- **Upstream Docker setup exists but is not a drop-in.** `docker/Dockerfile` is openSUSE
-  Tumbleweed based and the installer (`docker/install.sh`) is designed for a plain Linux
-  or macOS Docker host: it detects a host profile, mounts `/var/run/docker.sock`, mounts
-  `/`, `/home`, `/srv`, `/opt`, drops in a `hostexec` namespace bridge, writes
-  `compose.override.yml`, and runs its own `docker compose up`. None of that fits a
-  TrueNAS app (middleware owns compose, `-p ix-<appname>`, and would create a second
-  stack). We reuse its *ideas* (env vars, healthchecks, path parity, tini), not the files.
-- **pi-web needs two processes.** `package.json` bins: `pi-web` (CLI), `pi-web-server`
-  (web/API), `pi-web-sessiond` (agent runtime owner). `pi-web-server` does not spawn
-  sessiond. Upstream runs them as two containers sharing `/data`; we do the same.
-- **Node requirement**: `engines.node >= 22.19.0`. Latest npm version is
-  `@jmfederico/pi-web@1.202610.1`; peers `@earendil-works/pi-{ai,agent-core,coding-agent} ^1.0.0`,
-  which npm resolves itself with `--include=peer` (as upstream does).
-- **Local images are fine for custom apps.** Install/redeploy path is `docker compose up`
-  only (`compose_action(..., 'up')`); there is no `pull` on custom-app create or redeploy.
-  `pull` only happens via the explicit "pull images"/upgrade flow, which would fail for a
-  locally tagged image → don't use the UI Update button; redeploy instead. (I did check
-  this in the middleware; I stopped reading the rest as you asked.)
-- **mise facts used** (from current mise docs): `MISE_INSTALL_PATH` for the install script,
-  `MISE_VERSION` to pin, `MISE_DATA_DIR`/`MISE_CONFIG_DIR`/`MISE_SHIMS_DIR`,
-  `MISE_GLOBAL_CONFIG_FILE` (global config path), `MISE_TRUSTED_CONFIG_PATHS` +
-  `mise trust`, `mise install`, and shims placed on `PATH` (no `activate`, no shell hook
-  required for the shell the process is started with).
-- **Versions in your `mise.toml` all exist**: node `24.18.0`, bun `1.4.0`,
-  neovim `0.12.4`, awscli `2.36.29` (registry checked). All other tool names are valid
-  mise backends (`go`, `rust`, `python`, `uv`, `kubectl`, `helm`, `terraform`, `gh`,
-  `yq`, `jq`, `fzf`, `shellcheck`).
-- **The comments in `mise.toml` are dsh leftovers** (Node/amaro note, `/root` volume
-  reasoning) — not applicable here, and the `/etc/mise/config.toml` path they mention is
-  the one I actually want for a different reason (image-level, not a runtime volume).
-  The tool list itself is good and I'm keeping it.
+In the upstream repo and this box:
 
-## Key decisions (and why)
+- **pi-web needs two processes.** Bins: `pi-web` (CLI), `pi-web-server` (web/API),
+  `pi-web-sessiond` (agent runtime owner). `pi-web-server` does not spawn sessiond, so we
+  run two services sharing `/data`, like upstream.
+- **Node floor is `>=22.19.0`**, declared by pi-web *and* all three peers
+  (`@earendil-works/pi-{ai,agent-core,coding-agent}@1.1.0`), with **no upper bound**.
+  npm latest is `@jmfederico/pi-web@1.202610.1`.
+- **Upstream's Docker setup is not reusable here.** It targets a plain Docker host
+  (host-profile detection, `docker.sock`, `/home`+`/srv`+`/opt` mounts, `hostexec`
+  namespace bridge, its own `docker compose up`). TrueNAS middleware owns compose and
+  passes `-p ix-<app>`. We reuse its env-var layout, healthchecks and tini, not its files.
+- **Locally tagged images work**: custom-app create/redeploy runs `compose up` only, no
+  pull. Only the explicit pull-images/upgrade flow pulls, and that would fail for a
+  local-only tag → use **Redeploy**, not the Update button.
+- **The `mise.toml` comments are dsh leftovers** (Node/amaro note, `/root`-volume
+  reasoning) and are junk here. The tool list is good; only the `node` pin changes.
 
-1. **Write our own thin Dockerfile on `debian:bookworm-slim`** instead of vendoring
-   upstream's ~700-line openSUSE Dockerfile + installer + `hostexec` + `pi-web-docker`.
-   We need none of the host-bridge machinery on TrueNAS. Debian slim keeps the diff small
-   and everything in this repo is ours to read.
-2. **mise provides Node** (official distro build, so the bundled TypeScript type-stripper
-   works, which upstream explicitly cares about), and **pi-web is installed with mise's
-   npm into `/usr/local`** (`--prefix /usr/local`), so `pi-web-server`,
-   `pi-web-sessiond`, `pi-web` and a symlinked `pi` CLI land on the default `PATH` —
-   no dependency on mise shims for the app's own binaries.
-3. **`/mise` is image-level** (`MISE_DATA_DIR=/mise`, `MISE_SHIMS_DIR=/mise/shims`,
-   config at `/etc/mise/config.toml`). Tools are installed at build time, so nothing
-   under `/data` hides them. Consequence: a runtime `mise install` writes to the image
-   layer and is lost on container recreate — documented, with `MISE_DATA_DIR=/data/mise`
-   as the escape hatch if you'd rather have runtime installs persist.
-4. **Shims on `PATH` plus one `/etc/profile.d` hook.** pi-web spawns *login* shells for
-   terminals, and Debian's `/etc/profile` resets `PATH`, which would drop `/mise/shims`.
-   A 1-file hook re-adds it; agents and terminals then resolve the same tools.
-5. **Run as root** (like your `dsh` example). pi-web is explicitly not a sandbox and is
-   meant for a trusted LAN; root avoids ownership fights on the host bind mount. No
-   `pi-web` account like upstream creates.
-6. **One app, two services, one `/data` bind mount**, matching upstream's env-var layout
-   (`HOME=/data/home`, `XDG_CONFIG_HOME=/data/config`, `PI_WEB_DATA_DIR=/data/pi-web`,
-   `PI_CODING_AGENT_DIR=/data/pi-agent`) so upstream docs/agents stay accurate.
-7. **Code mounted at identical absolute paths** (`/mnt/skinner/...:/mnt/skinner/...`), so
-   a pi-web "project" path is the same inside and outside the container and sessions line
-   up with host worktrees. Same trick as upstream's host mounts, without the socket.
-8. **No `build:` in the compose file, no `container_name`, no `name:`.** Image is
-   prebuilt and tagged locally; the middleware passes `-p ix-<app>`.
-9. **The mise binary lives on `/data`, with a wrapper on `PATH`** so `mise self-update`
-   survives container recreation. See the section below.
+Verified by building throwaway probe images from `debian:bookworm-slim` and running them
+with a fresh volume mounted at `/data` (probes deleted afterwards):
+
+| Check | Result |
+| --- | --- |
+| `mise install --system` (image toolchain) | works, **no `MISE_EXPERIMENTAL` needed** |
+| Fresh volume: `node`, `jq`, `rustc` via shims | resolve from the system install, no user data present |
+| `mise self-update` target | replaced `/data/mise/mise`; image copy untouched |
+| self-update after `docker rm` + recreate on same volume | version persisted |
+| Runtime `mise use -g shellcheck@0.11.0` | installed to `/data`, config written to `/data/config/mise/config.toml`, shim in `/data/mise/shims`, and all three survived recreate |
+| `rustc` with `HOME=/data/home` and `/data` mounted | works **only** with `CARGO_HOME`/`RUSTUP_HOME` redirected (see below) |
+| Node 26.11.1 on `bookworm-slim` | needs `libatomic1` |
+| `node-pty` build (node-gyp) | OK on **both** 24.21.0 and 26.11.1 once `python3` + build tools are present |
+
+### Gotchas found (these shaped the design)
+
+1. **A wrapper script breaks shims.** My first idea — `/usr/local/bin/mise` as a shell
+   wrapper that `exec`s the `/data` copy — made runtime-created shims point at the wrapper,
+   and the wrapper's `exec` **loses `argv[0]`**, so mise could not tell which tool a shim
+   was for. Symptom: `shellcheck --version` printed *mise's* version. Fixed by making
+   `/usr/local/bin/mise` a **symlink** to `/data/mise/mise`: symlink chains preserve
+   `argv[0]`, and self-update canonicalizes to the `/data` file. A wrapper is now only
+   needed for the seed step, which moved into the entrypoint.
+2. **`MISE_CONFIG_DIR` hijacks the global config.** With it set, the global config *is*
+   `/etc/mise/config.toml`, so a runtime `mise use -g` writes into the image layer and is
+   lost on recreate. Leaving it unset keeps the image toolchain in the **system** config
+   (`/etc/mise/config.toml`, path independent of `MISE_CONFIG_DIR` — verified) while the
+   **global** config lands at `$XDG_CONFIG_HOME/mise/config.toml` =
+   `/data/config/mise/config.toml`, which persists.
+3. **rustup-backed rust installs into `$HOME`,** which is `/data/home` → a symlinked
+   toolchain that dangles on a fresh volume. `CARGO_HOME=/usr/local/share/cargo` +
+   `RUSTUP_HOME=/usr/local/share/rustup` keep it in the image (verified working).
+4. **Node 26 needs `libatomic1`** (Node 24 does not). Pi-web's floors allow 26.
+5. **node-gyp needs `python3`** — satisfied by mise's Python, but the toolchain layer must
+   run *before* the npm layer.
+6. `COPY` preserves host file modes, so the entrypoint needs an explicit `chmod 0755`
+   (caught by the probe failing to start).
+
+## Key decisions
+
+1. **Own thin Dockerfile on `debian:bookworm-slim`** rather than vendoring upstream's
+   openSUSE Dockerfile + installer + `hostexec` (~700 lines) that TrueNAS makes useless.
+2. **Two-tier mise** (the mise-documented "shared/system installs" pattern, which is
+   exactly the devcontainer-with-home-mount case):
+   - **Image tier**: `mise.toml` baked as the *system* config `/etc/mise/config.toml`,
+     installed with `mise install --system` into `/usr/local/share/mise/installs`, with
+     `mise reshim --system` shims in `/usr/local/share/mise/shims`. Always present, even
+     on a fresh volume; invisible-not-lost under the `/data` mount.
+   - **Runtime tier**: `MISE_DATA_DIR=/data/mise` → runtime installs, shims, plugins and
+     state persist. Runtime installs **take precedence** over system ones (verified).
+3. **mise provides Node** (official distro build, so the bundled TypeScript type-stripper
+   is present — `stripTypeScriptTypes` confirmed as a function), and pi-web is installed
+   with mise's npm into `/usr/local` (`--prefix /usr/local`) so `pi-web-server`,
+   `pi-web-sessiond`, `pi-web` and a symlinked `pi` are on the default `PATH`, independent
+   of mise.
+4. **`node = "26.11.1"`** — the newest release that works (verified run + `node-pty`
+   build). Requires `libatomic1`. `24.21.0` is the conservative fallback if you'd rather
+   match upstream's tested Node 22 line.
+5. **Entrypoint seeds the persistent binary**, creating `/data` subdirs and
+   `/data/mise/mise` on first start (atomic temp+`mv`, so sessiond/web can't race), with a
+   fallback symlink to the image copy if `/data` is unusable — degraded, never missing.
+6. **Run as root**, like your `dsh` example: pi-web is not a sandbox, it's LAN-only, and
+   root avoids ownership fights on the bind mount. No `pi-web` account.
+7. **bash/Debian login-shell note:** terminals get login shells and Debian's
+   `/etc/profile` rewrites `PATH`; `/etc/profile.d/10-mise-shims.sh` re-adds the shim
+   dirs so terminals and agent processes agree.
+8. **Compose has no `build:`, no `container_name`, no `name:`**, one `/data` bind mount.
 
 ## Files
 
-### `mise.toml` (cleanup, not a rewrite)
+### `mise.toml` (only the node pin changes)
 
-Drop the dsh comments, add a one-line header saying this is the image toolchain. Keep the
-tool list and your pins. Optionally bump node `24.18.0` → `24.21.0` (same lts line) — say
-the word and I'll leave it exactly as-is instead. `latest` entries stay `latest`; the
-build caches that layer, so a `CACHE_BUST` build arg is how you refresh them.
+```toml
+# Toolchain baked into the image at build time (system config /etc/mise/config.toml).
+# Runtime additions live in /data/mise and take precedence over these.
+[tools]
+node = "26.11.1"
+bun = "1.4.0"
+python = "latest"
+go = "latest"
+gh = "latest"
+awscli = "2.36.29"
+kubectl = "latest"
+helm = "latest"
+terraform = "latest"
+rust = "latest"
+neovim = "0.12.4"
+uv = "latest"
+fzf = "latest"
+yq = "latest"
+shellcheck = "latest"
+jq = "latest"
+```
 
 ### `Dockerfile`
 
 ```dockerfile
 # syntax=docker/dockerfile:1.7
-# pi-web for TrueNAS custom apps: mise-managed toolchain + locally built image.
-# Upstream's own Docker setup targets a plain Docker host (host mounts, docker.sock,
-# hostexec) and is deliberately not reused here.
+# pi-web for TrueNAS custom apps. Upstream's own Docker setup expects a plain Docker
+# host (host mounts, docker.sock, hostexec) and is deliberately not reused.
 FROM debian:bookworm-slim
 
 ARG MISE_VERSION=2026.10.7
@@ -102,7 +142,13 @@ ARG CACHE_BUST=local
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-# mise is image-level so a runtime /data bind mount cannot hide the toolchain.
+# MISE_DATA_DIR sits on the persistent volume, so runtime tool installs and shims
+# persist. The image's toolchain lives in the system dir (/usr/local/share/mise) and is
+# found automatically, with lower precedence than anything under /data/mise.
+# No MISE_CONFIG_DIR / MISE_GLOBAL_CONFIG_FILE: the image toolchain is the *system*
+# config (/etc/mise/config.toml) and the global config stays at
+# $XDG_CONFIG_HOME/mise/config.toml = /data/config/mise/config.toml, so runtime
+# `mise use -g` persists too.
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     SHELL=/bin/bash \
@@ -114,44 +160,38 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PI_WEB_DATA_DIR=/data/pi-web \
     PI_WEB_SESSIOND_SOCKET=/data/pi-web/sessiond.sock \
     PI_CODING_AGENT_DIR=/data/pi-agent \
-    MISE_DATA_DIR=/mise \
-    MISE_CONFIG_DIR=/mise \
+    MISE_DATA_DIR=/data/mise \
     MISE_CACHE_DIR=/mise/cache \
-    MISE_SHIMS_DIR=/mise/shims \
-    MISE_GLOBAL_CONFIG_FILE=/etc/mise/config.toml \
     MISE_TRUSTED_CONFIG_PATHS=/etc/mise \
     MISE_YES=1 \
     MISE_INSTALL_PATH=/usr/local/libexec/mise/mise \
-    PATH=/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    CARGO_HOME=/usr/local/share/cargo \
+    RUSTUP_HOME=/usr/local/share/rustup \
+    PATH=/usr/local/share/mise/shims:/data/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
+# build-essential + libatomic1: gcc/python for node-pty's node-gyp fallback, and
+# libatomic for Node 26's official build on bookworm.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     ca-certificates curl git git-lfs less tini procps ripgrep unzip xz-utils \
-    build-essential \
+    build-essential libatomic1 \
   && rm -rf /var/lib/apt/lists/*
 
-# mise itself; shims land in $MISE_SHIMS_DIR which is already on PATH.
-# The real binary lives in libexec; /usr/local/bin/mise is the persistence
-# wrapper further down (see "mise self-update").
+# mise itself. The real binary stays in libexec: /usr/local/bin/mise is a symlink to the
+# /data copy, created further down.
 RUN mkdir -p "$(dirname "$MISE_INSTALL_PATH")" \
   && curl -fsSL https://mise.run | MISE_VERSION="$MISE_VERSION" sh
 
-# Toolchain last-pinned-by: CACHE_BUST. Bump it to refresh `latest` tools.
+# Image toolchain: system installs + system shims (always present, fresh volume included).
 COPY mise.toml /etc/mise/config.toml
 RUN set -eux; \
   echo "mise toolchain cache bust: ${CACHE_BUST}"; \
   mise trust /etc/mise/config.toml; \
-  mise install; \
-  mise reshim
+  mise install --system; \
+  mise reshim --system; \
+  mise --version
 
-# `mise self-update` replaces the binary at its own canonicalized path, so the
-# copy it should update has to live on the persistent /data volume. This wrapper
-# (see "mise self-update persistence") seeds that copy from the image once and
-# always runs it.
-COPY image/mise-wrapper /usr/local/bin/mise
-RUN chmod 0755 /usr/local/bin/mise && /usr/local/bin/mise --version
-
-# pi-web via mise's npm, globals in /usr/local/bin (plain PATH, not a shim).
+# pi-web from npm, using mise's Node (globals land in /usr/local/bin, plain PATH).
 RUN set -eux; \
   echo "pi-web build cache bust: ${CACHE_BUST}"; \
   extra=""; \
@@ -163,28 +203,59 @@ RUN set -eux; \
   cd /usr/local/lib/node_modules/@jmfederico/pi-web && node -e "require('node-pty')"; \
   npm cache clean --force
 
-# pi-web spawns login shells for terminals; Debian's /etc/profile resets PATH.
+# Login shells (pi-web terminals) get PATH rewritten by /etc/profile; put the shim dirs
+# back so terminals resolve the same tools agents do.
 RUN printf '%s\n' \
   '# mise shims for login shells (pi-web terminals).' \
-  'case ":$PATH:" in *:/mise/shims:*) ;; *) PATH="/mise/shims:$PATH"; export PATH ;; esac' \
+  'for d in /usr/local/share/mise/shims /data/mise/shims; do' \
+  '  case ":$PATH:" in *:"$d":*) ;; *) PATH="$d:$PATH" ;; esac' \
+  'done; export PATH' \
   > /etc/profile.d/10-mise-shims.sh
+
+# `mise` on PATH is a symlink to the copy on the persistent volume: shims resolve
+# through it with argv[0] intact, and `mise self-update` replaces the file at its
+# canonicalized path, i.e. the one on /data. Dangling until the entrypoint seeds it, so
+# this must come after every build-time mise/npm step.
+RUN ln -s /data/mise/mise /usr/local/bin/mise
+
+COPY image/pi-web-entrypoint /usr/local/bin/pi-web-entrypoint
+RUN chmod 0755 /usr/local/bin/pi-web-entrypoint
 
 WORKDIR /workspace
 EXPOSE 8504
-ENTRYPOINT ["tini", "--"]
+ENTRYPOINT ["tini", "--", "/usr/local/bin/pi-web-entrypoint"]
 CMD ["pi-web-server"]
 ```
 
-Notes: `npm --allow-scripts` only exists on npm 12, hence the guard (on npm 11 install
-scripts run anyway). The `require('node-pty')` line is the build-time check that the
-native module actually built — pi-web terminals need it and it is the one thing that
-silently ships broken. If Node 24.18's npm turns out to be 12, the guard handles it; if
-node-pty still fails to build we'll see it at build time, not in the browser.
+### `image/pi-web-entrypoint`
+
+```sh
+#!/bin/sh
+# /data is a volume, so it hides the mise binary, shims and toolchain baked into the
+# image. Create the runtime directories and seed the persistent mise binary so shims and
+# `mise self-update` work from the very first start.
+mkdir -p /data/home /data/config /data/pi-web /data/pi-agent 2>/dev/null || true
+
+seed=/usr/local/libexec/mise/mise
+bin=/data/mise/mise
+link=/usr/local/bin/mise
+if [ ! -x "$bin" ]; then
+  if mkdir -p /data/mise 2>/dev/null \
+     && cp "$seed" "/data/mise/.mise.$$" 2>/dev/null \
+     && chmod 0755 "/data/mise/.mise.$$" \
+     && mv -f "/data/mise/.mise.$$" "$bin" 2>/dev/null; then
+    :
+  else
+    ln -sf "$seed" "$link"  # volume unusable: keep working, lose persistence
+  fi
+fi
+
+exec "$@"
+```
 
 ### `compose.yaml` (paste-ready TrueNAS custom app)
 
-Path placeholders: `/mnt/skinner/apps-pi-web` for persistent state, and the code root to
-mount for agent workspaces. **Confirm these two paths before I write the file.**
+`/mnt/skinner/apps-pi-web` is the one path to have ready. No code mounts, per your answer.
 
 ```yaml
 x-pi-web-image: &pi-web-image pi-web-truenas:latest
@@ -198,25 +269,20 @@ x-pi-web-environment: &pi-web-environment
   PI_WEB_HOST: 0.0.0.0
   PI_WEB_PORT: "8504"
 
-# Not a sandbox: keep off the internet, LAN/trusted network only.
-x-pi-web-volumes: &pi-web-volumes
-  - /mnt/skinner/apps-pi-web:/data
-  # Mounted at the same absolute path so host and container paths line up.
-  - /mnt/skinner/homes/matt/code:/mnt/skinner/homes/matt/code
-
 services:
   sessiond:
     image: *pi-web-image
     command: ["pi-web-sessiond"]
     restart: unless-stopped
     environment: *pi-web-environment
-    volumes: *pi-web-volumes
+    volumes:
+      - /mnt/skinner/apps-pi-web:/data
     healthcheck:
       test: ["CMD-SHELL", "test -S /data/pi-web/sessiond.sock"]
       interval: 10s
       timeout: 3s
       retries: 12
-      start_period: 10s
+      start_period: 60s
 
   web:
     image: *pi-web-image
@@ -226,7 +292,8 @@ services:
       sessiond:
         condition: service_healthy
     environment: *pi-web-environment
-    volumes: *pi-web-volumes
+    volumes:
+      - /mnt/skinner/apps-pi-web:/data
     ports:
       - "8504:8504"
     healthcheck:
@@ -234,7 +301,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
-      start_period: 10s
+      start_period: 60s
 
 x-action-required: False
 x-notes: >-
@@ -242,13 +309,17 @@ x-notes: >-
   service and keep running after you close the browser.
 
   Both services share `/mnt/skinner/apps-pi-web` (Pi config, session history,
-  pi-web data) and see your code at its real host path, so projects are added as
-  host-absolute paths (for example `/mnt/skinner/homes/matt/code/foo`).
+  pi-web data, and the mise toolchain installed at runtime). There are no code
+  mounts: clone or create repos inside `/data` (for example `/data/repos`) and add
+  that path as a project.
+
+  Tools come from mise (`node`, `python`, `go`, `rust`, `uv`, ...). `mise install`
+  and `mise self-update` inside the app persist across restarts and redeploys.
 
   Authenticate the agent under **Settings → Models** (provider API key), or run
   `pi` in a terminal. No authentication on the web UI: home-network use only.
 
-  The image is built locally; to update, rebuild it and use **Redeploy**, not the
+  The image is built locally; to update it, rebuild and use **Redeploy**, not the
   app Update button (there is no registry to pull from).
 x-portals:
   - host: 0.0.0.0
@@ -258,117 +329,72 @@ x-portals:
     scheme: http
 ```
 
-### `image/mise-wrapper` (the `mise` on `PATH`)
-
-```sh
-#!/bin/sh
-# Keep the mise binary on the persistent volume so `mise self-update` survives
-# TrueNAS recreating this container. The image copy is the seed.
-seed=/usr/local/libexec/mise/mise
-bin=/data/mise/mise
-if [ ! -x "$bin" ]; then
-  if mkdir -p /data/mise 2>/dev/null \
-     && cp "$seed" "/data/mise/.mise.$$" 2>/dev/null \
-     && chmod 0755 "/data/mise/.mise.$$" \
-     && mv -f "/data/mise/.mise.$$" "$bin" 2>/dev/null; then
-    :
-  else
-    bin=$seed  # /data not writable: degrade to an ephemeral self-update
-  fi
-fi
-exec "$bin" "$@"
-```
-
 ### `README.md`
 
-Build-and-deploy runbook: the `docker build` command on the box (including the
-`docker --config /etc/docker` fallback if the daemon socket config bites), the paste
-steps, first-run setup, how to rebuild/redeploy, where state lives, how to refresh the
-mise toolchain (`CACHE_BUST`), how to add a tool (`mise.toml` + rebuild, or a runtime
-`mise use` with `MISE_DATA_DIR=/data/mise`), and the security note.
+Runbook: build command, the `docker --config /etc/docker` fallback, paste/deploy steps,
+first-run setup, rebuild/redeploy, and the two-tier toolchain model — what lives where
+(`/etc/mise/config.toml` image toolchain, `/data/mise` runtime installs + binary,
+`/data/config/mise/config.toml` runtime `use -g` pins), how to change the image toolchain
+(edit `mise.toml`, rebuild with a new `CACHE_BUST`), and the security note.
 
 ### `.dockerignore` / `.gitignore`
 
 `compose.yaml`, `*.md`, `.git`, `.DS_Store` out of the build context; `data/`, `*.log`
 ignored by git.
 
-## Deploy flow (yours to run)
+## Deploy flow (yours)
 
-1. On the box: `mkdir -p /mnt/skinner/apps-pi-web` then
-   `docker build --build-arg CACHE_BUST=$(date +%s) -t pi-web-truenas:latest .`
-   (first build installs the whole mise toolchain: expect several minutes and a
-   multi-GB image — see Risks).
-2. Apps → Discover → **Custom App** → Install via YAML → paste `compose.yaml`.
-3. Open the portal on `:8504`; add a project (host-absolute path) and a workspace.
-4. Configure a model provider / API key in Settings → Models.
+1. `mkdir -p /mnt/skinner/apps-pi-web`
+2. `docker build --build-arg CACHE_BUST=$(date +%s) -t pi-web-truenas:latest .`
+   (first build installs the whole mise toolchain: several minutes, multi-GB image)
+3. Apps → Discover → **Custom App** → Install via YAML → paste `compose.yaml`
+4. Portal on `:8504`; add a project under `/data`; configure a provider key in
+   Settings → Models.
 
-## mise `self-update` persistence (your question)
+## Post-build smoke test (run these against the real image)
 
-Short answer: yes, and it is 7 lines of shell in the Dockerfile (now in the draft above).
-Details that make it work or not work:
+```sh
+T=$(mktemp -d)                              # NOT /tmp: noexec on this box
+mkdir -p "$T/data"
+docker run -d --name pi-web-smoke -v "$T/data:/data" pi-web-truenas:latest sleep infinity
+docker exec pi-web-smoke bash -lc 'mise --version; node --version; rustc --version; \
+  jq --version; which node; mise config ls; pi-web --help >/dev/null && echo pi-web-ok'
+docker exec pi-web-smoke mise use -g shellcheck@0.11.0   # runtime install...
+docker rm -f pi-web-smoke
+docker run -d --name pi-web-smoke -v "$T/data:/data" pi-web-truenas:latest sleep infinity
+docker exec pi-web-smoke bash -lc 'shellcheck --version; mise --version'  # ...persisted?
+docker rm -f pi-web-smoke && rm -rf "$T"
+```
 
-- `mise self-update` replaces the binary **at its own canonicalized path** (symlinks
-  resolved), and it **aborts before downloading if that directory is not writable**. It
-  does *not* honor `MISE_INSTALL_PATH` (that variable is only read by the `mise.run`
-  install script). So the only way to make the update land on the volume is for the
-  binary the process actually runs to *be* the file on the volume.
-- Therefore: real binary at `/usr/local/libexec/mise/mise` (build-time installs and the
-  `mise` command's shims point here, which keeps it working on a fresh volume), and
-  `/usr/local/bin/mise` is a tiny wrapper that seeds `/data/mise/mise` from the image once
-  and then always execs it. Container restarts already kept an update; this is what makes
-  it survive **Redeploy**, which recreates the container from the image.
-- Seeding is `cp` to a temp name + `mv -f`, so two containers (sessiond and web)
-  starting at once can't race to a half-written binary. If `/data` isn't writable the
-  wrapper silently falls back to the image copy instead of failing — a broken volume
-  mount degrades to "ephemeral self-update", never to "mise is gone".
-- What is *not* persisted by this: tools installed at runtime. `MISE_DATA_DIR` stays
-  `/mise` (image layer), so a runtime `mise install`/`mise use` survives restarts but is
-  lost on recreate. If you want that too, the mise-native way is
-  `MISE_DATA_DIR=/data/mise` plus `MISE_SHARED_INSTALL_DIRS=/mise` (or baking the
-  toolchain with `mise install --system`), which keeps the preinstalled toolchain visible
-  while new tools land on the volume. I did not put that in the default because a fresh
-  `/data` then owns the shims/state — more moving parts, and it needs a first-run
-  verification. Say the word and I'll make it variant B.
-- Drift: once `/data/mise/mise` exists, a rebuild no longer decides the mise version —
-  the volume copy wins forever. `rm /mnt/skinner/apps-pi-web/mise/mise` resets it to the
-  image's `MISE_VERSION` pin. Same story for `mise self-update --version <v>` if you want
-  to pin the binary without a rebuild.
+Plus one real `mise self-update` and re-create, since that is the property you asked for.
 
 ## Risks / things to know
 
-- **Image size and build time.** `rust`, `go`, `awscli`, `terraform`, `kubectl`, `helm`
-  together are large (rough estimate 3–6 GB image, 5–15 min first build). If you don't
-  need them in the agent's world, dropping `rust`, `terraform`, `awscli` is the single
-  biggest saving — tell me and I'll trim `mise.toml`.
-- **`latest` tool versions** mean the toolchain layer is only rebuilt when the Docker
-  cache is busted; that is what the `CACHE_BUST` arg is for. Pin more versions in
-  `mise.toml` if you want fully reproducible rebuilds.
-- **Shims point at the image's mise binary**, while the `mise` command on `PATH` runs the
-  persistent `/data` copy. After a self-update the two can disagree by a version; both
-  read the same `MISE_DATA_DIR`, so tools resolve either way. A `mise reshim` (run after
-  self-update, in the container) rewrites shims to the `/data` copy until the next
-  recreate.
-- **Don't use the app's Update/pull path**; it will try to pull `pi-web-truenas:latest`
-  from a registry that doesn't exist. Rebuild + Redeploy.
-- **Root + no auth is intentional** for a trusted LAN. Don't forward this port to the
+- **Node 26 is newer than upstream's tested line** (their Dockerfile defaults to Node 22).
+  It runs and `node-pty` builds (verified), but if anything misbehaves, `24.21.0` is a
+  one-line change; keep `libatomic1` installed either way (harmless).
+- **`latest` tool versions** mean the toolchain layer only rebuilds when the Docker cache
+  is busted — that is what `CACHE_BUST` is for. Pin more versions in `mise.toml` for fully
+  reproducible rebuilds.
+- **Cargo's registry cache is image-level** (`CARGO_HOME=/usr/local/share/cargo`), so crate
+  downloads are re-fetched after a recreate. Moving `CARGO_HOME` to `/data/cargo` in the
+  compose env is safe (keep `RUSTUP_HOME` in the image) if you'd rather have a warm cache.
+- **Don't use the app's Update/pull path**; it would pull `pi-web-truenas:latest` from a
+  registry that doesn't exist. Rebuild + Redeploy.
+- **Root + no auth is intentional** for a trusted LAN. Don't forward the port to the
   internet.
+- **First start copies ~160 MB** (the mise binary) into `/data/mise`. One time.
 - **`pathAccess.allowedPaths`** in `/data/config/pi-web/config.json` (or Settings →
-  General) is only needed to browse filesystem roots *outside* the mounted code path.
-- I have not run the build; the Dockerfile is unverified until you build it. The
-  `node -e "require('node-pty')"` assert is there to fail the build rather than surprise
-  you in the browser.
+  General) is only needed to browse roots outside the workspace.
+- The Dockerfile itself is not yet built against real pi-web; the probe verified the mise
+  layer and native-module build, not the pi-web npm layer end to end. The
+  `node -e "require('node-pty')"` assert and the smoke test above cover that.
 
-## Open questions before I write the files
+## Answer recap / still open
 
-1. **State path**: `/mnt/skinner/apps-pi-web:/data` — good, or somewhere else?
-2. **Code mounts**: mount all of `/mnt/skinner/homes/matt/code`, or a narrower set of
-   repos (or also `/mnt/skinner/homes/matt` for dotfiles/agent config)?
-3. **Tool list**: keep all of `mise.toml` as-is, or trim the heavy ones (rust/terraform/
-   awscli)?
-4. **Node pin**: keep `24.18.0` or bump to `24.21.0`?
+- 1 ✅ `/mnt/skinner/apps-pi-web:/data` (you create it).
+- 2 ✅ No code mounts; projects live under `/data` (noted in the app notes).
+- 3 ✅ `mise.toml` tool list unchanged, comments cleaned.
+- 4 ✅ `node = "26.11.1"` (newest; verified). Say so if you prefer `24.21.0`.
 
-Answer 1–4 and I'll write the files and commit them.
-
-## Work log
-
-- Git repo initialized here; existing `mise.toml` committed as the starting point.
+Nothing blocking: say go and I'll write the six files and commit them.
