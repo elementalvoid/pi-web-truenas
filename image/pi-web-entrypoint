@@ -1,0 +1,21 @@
+#!/bin/sh
+# /data is a volume, so it hides the mise binary, shims and toolchain baked into the
+# image. Create the runtime directories and seed the persistent mise binary so shims and
+# `mise self-update` work from the very first start.
+mkdir -p /data/home /data/config /data/pi-web /data/pi-agent 2>/dev/null || true
+
+seed=/usr/local/libexec/mise/mise
+bin=/data/mise/mise
+link=/usr/local/bin/mise
+if [ ! -x "$bin" ]; then
+  if mkdir -p /data/mise 2>/dev/null \
+     && cp "$seed" "/data/mise/.mise.$$" 2>/dev/null \
+     && chmod 0755 "/data/mise/.mise.$$" \
+     && mv -f "/data/mise/.mise.$$" "$bin" 2>/dev/null; then
+    :
+  else
+    ln -sf "$seed" "$link"  # volume unusable: keep working, lose persistence
+  fi
+fi
+
+exec "$@"
