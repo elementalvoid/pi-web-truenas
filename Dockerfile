@@ -7,6 +7,7 @@ FROM debian:trixie
 
 ARG MISE_VERSION=2026.10.7
 ARG PI_WEB_VERSION=latest
+ARG PLAYWRIGHT_VERSION=1.64.0
 ARG CACHE_BUST=local
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -29,6 +30,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PI_WEB_DATA_DIR=/data/pi-web \
     PI_WEB_SESSIOND_SOCKET=/data/pi-web/sessiond.sock \
     PI_CODING_AGENT_DIR=/data/pi-agent \
+    PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright \
     MISE_DATA_DIR=/data/mise \
     MISE_CACHE_DIR=/mise/cache \
     MISE_TRUSTED_CONFIG_PATHS=/etc/mise \
@@ -78,6 +80,24 @@ RUN set -eux; \
   if [ -x "$pi_bin" ]; then ln -sf "$pi_bin" /usr/local/bin/pi; fi; \
   cd /usr/local/lib/node_modules/@jmfederico/pi-web && node -e "require('node-pty')"; \
   npm cache clean --force
+
+# Playwright + Chromium, system-wide, so the agent's shells can drive a real browser.
+# Browsers live in /opt (image content), not /data: a volume mounted at runtime would
+# shadow anything baked into /data. Cost: a runtime `playwright install` of a *different*
+# version lands in /opt too and is lost on container recreation — the baked version is the
+# one that survives. `install-deps` apt-installs Chromium's shared libraries and needs a
+# distro-aware package list: 1.64.0 has a debian13 table, 1.49.1 stops at debian12.
+# Everything installs under /usr/local, like pi-web, so bare `playwright` resolves on PATH.
+RUN set -eux; \
+  echo "playwright cache bust: ${PLAYWRIGHT_VERSION}"; \
+  npm install -g --prefix /usr/local --no-audit --no-fund "playwright@${PLAYWRIGHT_VERSION}"; \
+  playwright install-deps chromium; \
+  playwright install chromium; \
+  chrome=$(node -p "require('/usr/local/lib/node_modules/playwright').chromium.executablePath()"); \
+  "$chrome" --headless --no-sandbox --disable-gpu --dump-dom about:blank > /dev/null; \
+  echo "chromium ok: $chrome"; \
+  npm cache clean --force; \
+  rm -rf /var/lib/apt/lists/*
 
 # pi-web spawns login shells for terminals, and Debian's /etc/profile rewrites PATH, which
 # would drop the shim dirs. Put them back so terminals resolve the same tools agents do.
