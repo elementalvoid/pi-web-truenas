@@ -1,0 +1,27 @@
+# Mise toolchain for the dsh container image.
+# Installed at build time via `mise install`; copies as the system-wide
+# global config (/etc/mise/config.toml — /root is a runtime volume, so the
+# config must not live there). Pin exact versions here to
+# freeze the toolchain; `latest` resolves at build time.
+[tools]
+# Official Node distro hosting dsh itself. Ubuntu's apt nodejs is compiled
+# WITHOUT the bundled amaro type-stripper, so node:module
+# .stripTypeScriptTypes throws ERR_NO_TYPESCRIPT and dsh's PTC code-run
+# mode dies with "Node.js is not compiled with TypeScript support".
+# Official builds bundle amaro; this must be >= 22.13 (unflagged API).
+node = "24.18.0"
+bun = "1.4.0"
+python = "latest"
+go = "latest"
+gh = "latest"
+awscli = "2.36.29"
+kubectl = "latest"
+helm = "latest"
+terraform = "latest"
+rust = "latest"
+neovim = "0.12.4"
+uv = "latest"
+fzf = "latest"
+yq = "latest"
+shellcheck = "latest"
+jq = "latest"
