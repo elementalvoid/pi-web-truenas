@@ -24,21 +24,25 @@ standard tools.
 
 ## Build
 
-On the TrueNAS box (the Docker CLI is available there; skip `--config` unless the daemon
-socket config gives trouble):
+On the TrueNAS box:
 
 ```sh
-cd /path/to/pi-web-truenas
 mkdir -p /mnt/skinner/apps-pi-web          # persistent state, must be exec-enabled
-docker build --build-arg CACHE_BUST=$(date +%s) -t pi-web-truenas:latest .
-# if the daemon socket is not found:
-# docker --config /etc/docker build --build-arg CACHE_BUST=$(date +%s) -t pi-web-truenas:latest .
+./build.sh
 ```
 
-First build takes roughly six minutes and produces a ~3.9 GB image (rust, go, terraform,
-awscli, kubectl, helm dominate). `CACHE_BUST` is `local` unless you pass one; change it to
-force the mise/pi-web layers to rebuild, e.g. after editing `mise.toml` or to pick up
-newer `latest` tool versions.
+`build.sh` tags the image `pi-web-truenas:latest` (the tag `compose.yaml` uses) and
+derives `CACHE_BUST` from a hash of `mise.toml`, so:
+
+- unchanged `mise.toml` → layers are cached, a rebuild is seconds;
+- edited `mise.toml` → the toolchain and pi-web layers rebuild automatically;
+- `./build.sh --refresh` forces a fresh bust, for picking up newer `latest` versions;
+- extra arguments go to `docker build`, e.g. `./build.sh --no-cache --progress plain`.
+
+Environment overrides: `IMAGE=pi-web-truenas:test ./build.sh`, and
+`DOCKER="docker --config /etc/docker" ./build.sh` if the daemon socket is not found by
+the default config. First build takes ~5 minutes and produces a ~3.9 GB image (rust, go,
+terraform, awscli, kubectl, helm dominate).
 
 ## Deploy
 
@@ -61,7 +65,7 @@ workspace, start a session. Configure a model provider/API key under
 ## Updating
 
 ```sh
-docker build --build-arg CACHE_BUST=$(date +%s) -t pi-web-truenas:latest .
+./build.sh          # or ./build.sh --refresh to force newer `latest` tool versions
 ```
 
 Then use the app's **Redeploy** action. Do **not** use the app's Update/pull button: the
@@ -92,7 +96,8 @@ volume), and anything installed at runtime into `/data/mise` **takes precedence*
 - Install a tool for a session/project: `mise use -g <tool>@<version>` → persists.
 - Prefer `<repo>/mise.toml` inside a workspace; `mise install` there is also persistent
   (installs go to `/data/mise`).
-- Change the *image* toolchain: edit `mise.toml`, rebuild with a new `CACHE_BUST`.
+- Change the *image* toolchain: edit `mise.toml`, rebuild with `./build.sh` (the bust
+  follows the file), then Redeploy.
 - Update mise itself: `mise self-update` — the binary is seeded onto `/data` by the
   entrypoint, so the update survives container recreation (until you change `MISE_VERSION`
   in the Dockerfile and delete `/data/mise/mise`, which resets it to the image pin).
@@ -123,6 +128,7 @@ a trusted LAN/VPN, or put an authenticated reverse proxy in front of it.
 
 | file | purpose |
 | --- | --- |
+| `build.sh` | builds the image with a `mise.toml`-derived `CACHE_BUST` |
 | `Dockerfile` | the image: base, standard tools, mise two-tier toolchain, pi-web |
 | `mise.toml` | toolchain baked into the image (system config) |
 | `image/pi-web-entrypoint` | seeds `/data` and the persistent mise binary, then runs the service |
