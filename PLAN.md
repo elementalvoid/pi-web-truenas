@@ -7,9 +7,9 @@ custom app, from a **locally built** image (no registry). The image must carry *
 (used via shims)** plus a suite of standard dev tools so agents inside pi-web sessions
 have a usable toolchain.
 
-Deliverables in this repo: `Dockerfile`, `mise.toml`, `compose.yaml` (the paste-ready
-TrueNAS custom-app YAML), `README.md`, `.dockerignore`, `.gitignore`. No app is started
-here — build/deploy is yours.
+Deliverables in this repo: `Dockerfile`, `image/mise-wrapper`, `mise.toml`,
+`compose.yaml` (the paste-ready TrueNAS custom-app YAML), `README.md`, `.dockerignore`,
+`.gitignore`. No app is started here — build/deploy is yours.
 
 ## What I verified
 
@@ -75,6 +75,8 @@ here — build/deploy is yours.
    up with host worktrees. Same trick as upstream's host mounts, without the socket.
 8. **No `build:` in the compose file, no `container_name`, no `name:`.** Image is
    prebuilt and tagged locally; the middleware passes `-p ix-<app>`.
+9. **The mise binary lives on `/data`, with a wrapper on `PATH`** so `mise self-update`
+   survives container recreation. See the section below.
 
 ## Files
 
@@ -119,7 +121,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     MISE_GLOBAL_CONFIG_FILE=/etc/mise/config.toml \
     MISE_TRUSTED_CONFIG_PATHS=/etc/mise \
     MISE_YES=1 \
-    MISE_INSTALL_PATH=/usr/local/bin/mise \
+    MISE_INSTALL_PATH=/usr/local/libexec/mise/mise \
     PATH=/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 RUN apt-get update \
@@ -129,7 +131,10 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 # mise itself; shims land in $MISE_SHIMS_DIR which is already on PATH.
-RUN curl -fsSL https://mise.run | MISE_VERSION="$MISE_VERSION" sh
+# The real binary lives in libexec; /usr/local/bin/mise is the persistence
+# wrapper further down (see "mise self-update").
+RUN mkdir -p "$(dirname "$MISE_INSTALL_PATH")" \
+  && curl -fsSL https://mise.run | MISE_VERSION="$MISE_VERSION" sh
 
 # Toolchain last-pinned-by: CACHE_BUST. Bump it to refresh `latest` tools.
 COPY mise.toml /etc/mise/config.toml
@@ -138,6 +143,13 @@ RUN set -eux; \
   mise trust /etc/mise/config.toml; \
   mise install; \
   mise reshim
+
+# `mise self-update` replaces the binary at its own canonicalized path, so the
+# copy it should update has to live on the persistent /data volume. This wrapper
+# (see "mise self-update persistence") seeds that copy from the image once and
+# always runs it.
+COPY image/mise-wrapper /usr/local/bin/mise
+RUN chmod 0755 /usr/local/bin/mise && /usr/local/bin/mise --version
 
 # pi-web via mise's npm, globals in /usr/local/bin (plain PATH, not a shim).
 RUN set -eux; \
@@ -246,6 +258,27 @@ x-portals:
     scheme: http
 ```
 
+### `image/mise-wrapper` (the `mise` on `PATH`)
+
+```sh
+#!/bin/sh
+# Keep the mise binary on the persistent volume so `mise self-update` survives
+# TrueNAS recreating this container. The image copy is the seed.
+seed=/usr/local/libexec/mise/mise
+bin=/data/mise/mise
+if [ ! -x "$bin" ]; then
+  if mkdir -p /data/mise 2>/dev/null \
+     && cp "$seed" "/data/mise/.mise.$$" 2>/dev/null \
+     && chmod 0755 "/data/mise/.mise.$$" \
+     && mv -f "/data/mise/.mise.$$" "$bin" 2>/dev/null; then
+    :
+  else
+    bin=$seed  # /data not writable: degrade to an ephemeral self-update
+  fi
+fi
+exec "$bin" "$@"
+```
+
 ### `README.md`
 
 Build-and-deploy runbook: the `docker build` command on the box (including the
@@ -269,6 +302,38 @@ ignored by git.
 3. Open the portal on `:8504`; add a project (host-absolute path) and a workspace.
 4. Configure a model provider / API key in Settings → Models.
 
+## mise `self-update` persistence (your question)
+
+Short answer: yes, and it is 7 lines of shell in the Dockerfile (now in the draft above).
+Details that make it work or not work:
+
+- `mise self-update` replaces the binary **at its own canonicalized path** (symlinks
+  resolved), and it **aborts before downloading if that directory is not writable**. It
+  does *not* honor `MISE_INSTALL_PATH` (that variable is only read by the `mise.run`
+  install script). So the only way to make the update land on the volume is for the
+  binary the process actually runs to *be* the file on the volume.
+- Therefore: real binary at `/usr/local/libexec/mise/mise` (build-time installs and the
+  `mise` command's shims point here, which keeps it working on a fresh volume), and
+  `/usr/local/bin/mise` is a tiny wrapper that seeds `/data/mise/mise` from the image once
+  and then always execs it. Container restarts already kept an update; this is what makes
+  it survive **Redeploy**, which recreates the container from the image.
+- Seeding is `cp` to a temp name + `mv -f`, so two containers (sessiond and web)
+  starting at once can't race to a half-written binary. If `/data` isn't writable the
+  wrapper silently falls back to the image copy instead of failing — a broken volume
+  mount degrades to "ephemeral self-update", never to "mise is gone".
+- What is *not* persisted by this: tools installed at runtime. `MISE_DATA_DIR` stays
+  `/mise` (image layer), so a runtime `mise install`/`mise use` survives restarts but is
+  lost on recreate. If you want that too, the mise-native way is
+  `MISE_DATA_DIR=/data/mise` plus `MISE_SHARED_INSTALL_DIRS=/mise` (or baking the
+  toolchain with `mise install --system`), which keeps the preinstalled toolchain visible
+  while new tools land on the volume. I did not put that in the default because a fresh
+  `/data` then owns the shims/state — more moving parts, and it needs a first-run
+  verification. Say the word and I'll make it variant B.
+- Drift: once `/data/mise/mise` exists, a rebuild no longer decides the mise version —
+  the volume copy wins forever. `rm /mnt/skinner/apps-pi-web/mise/mise` resets it to the
+  image's `MISE_VERSION` pin. Same story for `mise self-update --version <v>` if you want
+  to pin the binary without a rebuild.
+
 ## Risks / things to know
 
 - **Image size and build time.** `rust`, `go`, `awscli`, `terraform`, `kubectl`, `helm`
@@ -278,6 +343,11 @@ ignored by git.
 - **`latest` tool versions** mean the toolchain layer is only rebuilt when the Docker
   cache is busted; that is what the `CACHE_BUST` arg is for. Pin more versions in
   `mise.toml` if you want fully reproducible rebuilds.
+- **Shims point at the image's mise binary**, while the `mise` command on `PATH` runs the
+  persistent `/data` copy. After a self-update the two can disagree by a version; both
+  read the same `MISE_DATA_DIR`, so tools resolve either way. A `mise reshim` (run after
+  self-update, in the container) rewrites shims to the `/data` copy until the next
+  recreate.
 - **Don't use the app's Update/pull path**; it will try to pull `pi-web-truenas:latest`
   from a registry that doesn't exist. Rebuild + Redeploy.
 - **Root + no auth is intentional** for a trusted LAN. Don't forward this port to the
