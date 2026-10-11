@@ -41,10 +41,13 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # Standard tools for an agent/dev container. build-essential plus python (from mise) are
 # what node-pty's node-gyp fallback needs; libatomic1 is required by Node 26's official
 # build on Debian.
+# The GTK4/WebKitGTK 6 dev packages (with pkg-config) are the native build deps for
+# webkit-based GUI shells (e.g. Tauri 2 on Linux), so `cargo build` works in the image.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     ca-certificates curl git git-lfs less tini procps ripgrep unzip xz-utils \
     zip zstd patch file rsync openssh-client build-essential libatomic1 \
+    pkg-config libgtk-4-dev libwebkitgtk-6.0-dev libjavascriptcoregtk-6.0-dev \
   && rm -rf /var/lib/apt/lists/*
 
 # mise itself. The real binary stays in libexec: /usr/local/bin/mise is a symlink to the
