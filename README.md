@@ -36,7 +36,11 @@ derives `CACHE_BUST` from a hash of `mise.toml`, so:
 
 - unchanged `mise.toml` → layers are cached, a rebuild is seconds;
 - edited `mise.toml` → the toolchain and pi-web layers rebuild automatically;
-- `./build.sh --refresh` forces a fresh bust, for picking up newer `latest` versions;
+- a new `@jmfederico/pi-web` release → only the pi-web layer re-runs, because `build.sh`
+  resolves the current version from npm first (`--build-arg PI_WEB_VERSION=...` overrides
+  it; being offline falls back to the Dockerfile's `latest`);
+- `./build.sh --refresh` forces a fresh bust, for picking up newer `latest` *toolchain*
+  versions, which are not looked up individually;
 - extra arguments go to `docker build`, e.g. `./build.sh --no-cache --progress plain`.
 
 Environment overrides: `IMAGE=pi-web-truenas:test ./build.sh`, and
