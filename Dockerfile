@@ -7,6 +7,7 @@ FROM debian:trixie
 
 ARG MISE_VERSION=2026.10.7
 ARG PI_WEB_VERSION=latest
+ARG PI_CODING_AGENT_VERSION=latest
 ARG PLAYWRIGHT_VERSION=1.64.0
 ARG CACHE_BUST=local
 
@@ -69,16 +70,22 @@ RUN set -eux; \
   "$MISE_INSTALL_PATH" --version
 
 # pi-web from npm via mise's Node. Globals land in /usr/local/bin, on the plain PATH.
-# The require() is a build-time check that the node-pty native module really works.
+# pi-web declares the Pi SDK (@earendil-works/pi-coding-agent) as an *optional* peer, which
+# npm does not install: without it piRuntime.js cannot find a host Pi and sessiond refuses
+# to start. Install it explicitly (it is the `pi` command) in the same global tree.
+# The checks are build-time guards: node-pty's native module, and pi-web's own runtime
+# selection of the SDK we just installed.
 RUN set -eux; \
   echo "pi-web build cache bust: ${CACHE_BUST}"; \
   extra=""; \
   if [ "$(npm --version | cut -d. -f1)" -ge 12 ]; then extra="--allow-scripts=node-pty"; fi; \
   npm install -g --prefix /usr/local --omit=dev --include=peer --no-audit --no-fund \
-    ${extra} "@jmfederico/pi-web@${PI_WEB_VERSION}"; \
-  pi_bin=/usr/local/lib/node_modules/@jmfederico/pi-web/node_modules/.bin/pi; \
-  if [ -x "$pi_bin" ]; then ln -sf "$pi_bin" /usr/local/bin/pi; fi; \
-  cd /usr/local/lib/node_modules/@jmfederico/pi-web && node -e "require('node-pty')"; \
+    ${extra} "@jmfederico/pi-web@${PI_WEB_VERSION}" \
+    "@earendil-works/pi-coding-agent@${PI_CODING_AGENT_VERSION}"; \
+  cd /usr/local/lib/node_modules/@jmfederico/pi-web; \
+  node -e "require('node-pty')"; \
+  node -e "import('./dist/piRuntime.js').then(m => m.selectPiRuntimePackageDir()).then(d => console.log('pi sdk:', d))"; \
+  /usr/local/bin/pi --version; \
   npm cache clean --force
 
 # Playwright + Chromium, system-wide, so the agent's shells can drive a real browser.
