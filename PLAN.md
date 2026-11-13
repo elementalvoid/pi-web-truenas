@@ -8,8 +8,9 @@ dev/test container**: mise-managed toolchain via shims, the tools in `mise.toml`
 runtime tool installs / `mise self-update` that survive the container being recreated.
 
 Deliverables in this repo: `Dockerfile`, `image/pi-web-entrypoint`, `mise.toml`,
-`compose.yaml` (paste-ready TrueNAS custom-app YAML), `README.md`, `.dockerignore`,
-`.gitignore`. I build nothing here and start nothing — build/deploy is yours.
+`compose.yaml` (paste-ready TrueNAS custom-app YAML), `build.sh`, `README.md`,
+`.dockerignore`, `.gitignore`. I build nothing here and start nothing — build/deploy is
+yours.
 
 Decisions locked in: state at `/mnt/skinner/apps-pi-web:/data` (you create it), **no code
 mounts**, `mise.toml` tool list unchanged, Node at 26.11.1, **non-slim base**, extra
@@ -85,6 +86,10 @@ the real two-service shape:
 Also confirmed on both: `node 26.11.1`, `rustc 1.99.0`, `go 1.27.2`, `terraform 1.16.5`,
 `aws-cli 2.36.29` (running on mise's Python 3.14) and the `pi` CLI (peer of pi-web).
 
+These probes predate later image changes — the Playwright + Chromium layer, the GTK4/
+WebKitGTK dev packages, and the explicit Pi SDK install (`cb2266a`, which fixed `sessiond`
+refusing to start without it). Those layers were not re-probed.
+
 Real API response from the probe (web + sessiond healthy, pi 1.1.0):
 
 ```json
@@ -136,9 +141,10 @@ Real API response from the probe (web + sessiond healthy, pi 1.1.0):
 3. **Two services** (sessiond + web) sharing `/data`, exactly like upstream — pi-web's
    `pi-web-server` does not spawn `pi-web-sessiond`. Verified working.
 4. **mise provides Node** (official distro build, so `stripTypeScriptTypes` is present) and
-   pi-web is installed with mise's npm into `/usr/local` (`--prefix /usr/local`) so
-   `pi-web-server`, `pi-web-sessiond`, `pi-web` and a symlinked `pi` are on the plain
-   `PATH`, independent of mise.
+   pi-web and the Pi SDK (`@earendil-works/pi-coding-agent`, which provides `pi`) are
+   installed with mise's npm into `/usr/local` (`--prefix /usr/local`), so
+   `pi-web-server`, `pi-web-sessiond`, `pi-web` and `pi` are on the plain `PATH`,
+   independent of mise.
 5. **`node = "26.11.1"`** — newest release that works end to end (pi-web and all three
    `@earendil-works/pi-*` peers declare `>=22.19.0` with no upper bound; node-pty builds).
    Fallback if you want upstream's tested line: `24.21.0`.
@@ -179,6 +185,11 @@ jq = "latest"
 ```
 
 ### `Dockerfile`
+
+Snapshot from the original plan; the repo's `Dockerfile` is authoritative. Later commits
+added the Playwright + Chromium layer, `pkg-config` with the GTK4/WebKitGTK 6 dev packages
+and `PI_CODING_AGENT_VERSION` for the explicitly installed Pi SDK, and dropped the old
+`node_modules/.bin/pi` symlink.
 
 ```dockerfile
 # syntax=docker/dockerfile:1.7
@@ -380,6 +391,12 @@ x-portals:
     scheme: http
 ```
 
+### `build.sh`
+
+Thin `docker build` wrapper: `CACHE_BUST` from a `mise.toml` hash (or `--refresh`), npm
+lookups for `PI_WEB_VERSION` and `PI_CODING_AGENT_VERSION` so those layers rebuild on a
+new release, `--build-arg` overrides, and `IMAGE` / `DOCKER` env overrides.
+
 ### `README.md`
 
 Runbook: build command, the `docker --config /etc/docker` fallback, paste/deploy steps,
@@ -391,14 +408,14 @@ the security note.
 
 ### `.dockerignore` / `.gitignore`
 
-`compose.yaml`, `*.md`, `.git`, `.DS_Store` out of the build context; `data/`, `*.log`
-ignored by git.
+`.git`, `.gitignore`, `*.md`, `compose.yaml`, `data/`, `*.log`, `.DS_Store` out of the
+build context; `data/`, `*.log`, `.DS_Store` ignored by git.
 
 ## Deploy flow (yours)
 
 1. `mkdir -p /mnt/skinner/apps-pi-web`
-2. `docker build --build-arg CACHE_BUST=$(date +%s) -t pi-web-truenas:latest .`
-   (~6 minutes cold, ~2 when cached; ~3.9 GB image)
+2. `./build.sh` (wraps `docker build`: derives `CACHE_BUST` from `mise.toml` and resolves
+   the pi-web and Pi SDK versions; ~6 minutes cold, ~2 when cached, multi-GB image)
 3. Apps → Discover → **Custom App** → Install via YAML → paste `compose.yaml`
 4. Portal on `:8504`; add a project under `/data`; configure a provider key in
    Settings → Models.
@@ -411,7 +428,7 @@ docker run -d --name pi-web-smoke -v pi-web-smoke:/data -p 18504:8504 pi-web-tru
 sleep 8 && docker exec pi-web-smoke test -S /data/pi-web/sessiond.sock && echo "sessiond ok"
 docker run -d --name pi-web-web -v pi-web-smoke:/data -p 18505:8504 pi-web-truenas:latest pi-web-server
 sleep 6 && curl -fsS http://127.0.0.1:18505/api/pi-web/runtime && curl -so /dev/null -w '%{http_code}\n' http://127.0.0.1:18505/
-docker exec pi-web-web bash -lc 'node --version; mise --version; rustc --version'
+docker exec pi-web-web bash -lc 'node --version; pi --version; mise --version; rustc --version'
 docker rm -f pi-web-smoke pi-web-web && docker volume rm pi-web-smoke
 ```
 
@@ -419,8 +436,9 @@ Use a named volume or a ZFS dataset for `/data`, never a `noexec` mount.
 
 ## Risks / things to know
 
-- **Image is ~3.9 GB** and the first build takes ~6 minutes (rust, go, terraform, awscli,
-  kubectl, helm are the bulk). Baking fewer tools is the only meaningful way to shrink it.
+- **Image is multi-GB** (exact size is printed by `build.sh`) and the first build takes
+  ~6 minutes (rust, go, terraform, awscli, kubectl, helm, Chromium are the bulk). Baking
+  fewer tools is the only meaningful way to shrink it.
 - **`latest` tool versions** mean the toolchain layer only rebuilds when the Docker cache
   is busted — that is what `CACHE_BUST` is for. Pin more versions for reproducible builds.
 - **Cargo's registry cache is image-level** (`CARGO_HOME=/usr/local/share/cargo`), so crate
@@ -439,5 +457,4 @@ Use a named volume or a ZFS dataset for `/data`, never a `noexec` mount.
   both bases, but not a real agent session (no model provider configured) and not the
   TrueNAS/paste flow itself.
 
-Say go and I'll write the six files (`Dockerfile`, `image/pi-web-entrypoint`, `mise.toml`,
-`compose.yaml`, `README.md`, plus ignore files) and commit them.
+All of the above is delivered and committed; `README.md` is the runbook.

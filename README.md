@@ -15,11 +15,18 @@ standard tools.
 - `debian:trixie` base plus `git`, `git-lfs`, `openssh-client`, `rsync`, `ripgrep`,
   `jq`*, `less`, `file`, `zip`/`unzip`, `zstd`, `patch`, `procps`, `curl`, `tini`,
   `build-essential`.
+- `pkg-config` and the GTK4 / WebKitGTK 6 dev packages, so webkit-based GUI shells
+  (e.g. Tauri 2) build with `cargo`.
 - The toolchain from `mise.toml` via **mise** (`node`, `bun`, `python`, `go`, `rust`,
   `gh`, `awscli`, `kubectl`, `helm`, `terraform`, `neovim`, `uv`, `fzf`, `yq`,
   `shellcheck`, `jq`).
-- `@jmfederico/pi-web` plus its Pi Coding Agent peer (`pi-web-server`, `pi-web-sessiond`,
-  `pi-web`, `pi`).
+- `@jmfederico/pi-web` plus the Pi SDK (`@earendil-works/pi-coding-agent`, which provides
+  `pi`). Both are installed explicitly: the SDK is an optional peer that npm does not
+  install, and without it `sessiond` refuses to start.
+  Commands: `pi-web-server`, `pi-web-sessiond`, `pi-web`, `pi`.
+- **Playwright + Chromium** system-wide, so agent shells can drive a browser. Browsers
+  live in `/opt/ms-playwright`; a runtime `playwright install` of a *different* version
+  lands there too and is lost on container recreation.
 - (*) `jq` and friends come from mise, not apt, so they are the versions pinned there.
 
 ## Build
@@ -36,17 +43,18 @@ derives `CACHE_BUST` from a hash of `mise.toml`, so:
 
 - unchanged `mise.toml` → layers are cached, a rebuild is seconds;
 - edited `mise.toml` → the toolchain and pi-web layers rebuild automatically;
-- a new `@jmfederico/pi-web` release → only the pi-web layer re-runs, because `build.sh`
-  resolves the current version from npm first (`--build-arg PI_WEB_VERSION=...` overrides
-  it; being offline falls back to the Dockerfile's `latest`);
+- a new `@jmfederico/pi-web` or Pi SDK (`@earendil-works/pi-coding-agent`) release → only
+  the pi-web layer re-runs, because `build.sh` resolves both versions from npm first
+  (`--build-arg PI_WEB_VERSION=...` / `PI_CODING_AGENT_VERSION=...` overrides them; being
+  offline falls back to the Dockerfile's `latest`);
 - `./build.sh --refresh` forces a fresh bust, for picking up newer `latest` *toolchain*
   versions, which are not looked up individually;
 - extra arguments go to `docker build`, e.g. `./build.sh --no-cache --progress plain`.
 
 Environment overrides: `IMAGE=pi-web-truenas:test ./build.sh`, and
 `DOCKER="docker --config /etc/docker" ./build.sh` if the daemon socket is not found by
-the default config. First build takes ~5 minutes and produces a ~3.9 GB image (rust, go,
-terraform, awscli, kubectl, helm dominate).
+the default config. First build takes ~5 minutes and produces a multi-GB image (rust, go,
+terraform, awscli, kubectl, helm and Chromium dominate; `build.sh` prints the exact size).
 
 ## Deploy
 
