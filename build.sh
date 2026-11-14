@@ -9,6 +9,9 @@
 #   ./build.sh --refresh       # force a fresh CACHE_BUST (pick up newer `latest` tools)
 #   ./build.sh --no-cache      # extra args are passed straight to `docker build`
 #
+# The base image is always re-fetched (docker build --pull): debian:trixie is a moving tag,
+# so a stale local copy means stale base packages.
+#
 # Overrides: IMAGE=tag (default pi-web-truenas:latest), DOCKER="docker --config /etc/docker".
 # An explicit --build-arg PI_WEB_VERSION=... (or PI_CODING_AGENT_VERSION=...,
 # SOLIDCRAFT_VERSION=...) skips that package's lookup.
@@ -59,8 +62,11 @@ if [[ " $* " != *"--build-arg SOLIDCRAFT_VERSION"* ]]; then
   fi
 fi
 
+# --pull: always ask for a newer debian:trixie, so the base carries current packages instead
+# of whatever was pulled last. If the tag has moved this invalidates every layer (full
+# rebuild); if not, nothing changes.
 echo "==> building $image (CACHE_BUST=$bust${pi_web_args[*]:+ ${pi_web_args[*]}}${solidcraft_args[*]:+ ${solidcraft_args[*]}})"
-"$docker_cmd" build --build-arg "CACHE_BUST=$bust" \
+"$docker_cmd" build --pull --build-arg "CACHE_BUST=$bust" \
   "${pi_web_args[@]}" "${solidcraft_args[@]}" -t "$image" "$@" .
 
 echo
