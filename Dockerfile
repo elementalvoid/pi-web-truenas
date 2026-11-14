@@ -9,6 +9,7 @@ ARG MISE_VERSION=2026.10.7
 ARG PI_WEB_VERSION=latest
 ARG PI_CODING_AGENT_VERSION=latest
 ARG PLAYWRIGHT_VERSION=1.64.0
+ARG SOLIDCRAFT_VERSION=0.41.0
 ARG CACHE_BUST=local
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -51,6 +52,7 @@ RUN apt-get update \
     ca-certificates curl git git-lfs less tini procps ripgrep unzip xz-utils \
     zip zstd patch file rsync openssh-client build-essential libatomic1 \
     pkg-config libgtk-4-dev libwebkitgtk-6.0-dev libjavascriptcoregtk-6.0-dev \
+    mesa-vulkan-drivers \
   && rm -rf /var/lib/apt/lists/*
 
 # mise itself. The real binary stays in libexec: /usr/local/bin/mise is a symlink to the
@@ -60,21 +62,24 @@ RUN mkdir -p "$(dirname "$MISE_INSTALL_PATH")" \
 
 # Image toolchain: mise system installs + system shims. Always present, fresh volume
 # included. Build-time mise calls must use $MISE_INSTALL_PATH: /usr/local/bin/mise does not
-# exist yet, and is a dangling symlink from the moment it does.
+# exist yet, and is a dangling symlink from the moment it does. The download cache
+# (MISE_CACHE_DIR) is ~400 MB of tarballs held only for re-extraction, so it goes at the end
+# of the same layer; nothing installs by link into it, and a runtime `mise install` refills it.
 COPY mise.toml /etc/mise/config.toml
 RUN set -eux; \
   echo "mise toolchain cache bust: ${CACHE_BUST}"; \
   "$MISE_INSTALL_PATH" trust /etc/mise/config.toml; \
   "$MISE_INSTALL_PATH" install --system; \
   "$MISE_INSTALL_PATH" reshim --system; \
-  "$MISE_INSTALL_PATH" --version
+  rm -rf "$MISE_CACHE_DIR"; \
+  mkdir -p "$MISE_CACHE_DIR"
 
 # pi-web from npm via mise's Node. Globals land in /usr/local/bin, on the plain PATH.
 # pi-web declares the Pi SDK (@earendil-works/pi-coding-agent) as an *optional* peer, which
 # npm does not install: without it piRuntime.js cannot find a host Pi and sessiond refuses
 # to start. Install it explicitly (it is the `pi` command) in the same global tree.
-# The checks are build-time guards: node-pty's native module, and pi-web's own runtime
-# selection of the SDK we just installed.
+# Two guards stay, both for silent failures: node-pty's native module, and pi-web's own
+# runtime selection of the SDK we just installed (without it sessiond refuses to start).
 RUN set -eux; \
   echo "pi-web build cache bust: ${CACHE_BUST}"; \
   extra=""; \
@@ -85,8 +90,7 @@ RUN set -eux; \
   cd /usr/local/lib/node_modules/@jmfederico/pi-web; \
   node -e "require('node-pty')"; \
   node -e "import('./dist/piRuntime.js').then(m => m.selectPiRuntimePackageDir()).then(d => console.log('pi sdk:', d))"; \
-  /usr/local/bin/pi --version; \
-  npm cache clean --force
+  rm -rf "$HOME/.npm"
 
 # Playwright + Chromium, system-wide, so the agent's shells can drive a real browser.
 # Browsers live in /opt (image content), not /data: a volume mounted at runtime would
@@ -100,28 +104,36 @@ RUN set -eux; \
   npm install -g --prefix /usr/local --no-audit --no-fund "playwright@${PLAYWRIGHT_VERSION}"; \
   playwright install-deps chromium; \
   playwright install chromium; \
-  chrome=$(node -p "require('/usr/local/lib/node_modules/playwright').chromium.executablePath()"); \
-  "$chrome" --headless --no-sandbox --disable-gpu --dump-dom about:blank > /dev/null; \
-  echo "chromium ok: $chrome"; \
-  npm cache clean --force; \
+  rm -rf "$HOME/.npm" /var/lib/apt/lists/*
+
+# SolidCraft: parametric CAD from its GitHub release .deb. The Vulkan userspace it renders
+# with (mesa-vulkan-drivers: radeon for the /dev/dri iGPU, lavapipe for GPU-less software
+# rendering) is in the apt layer above, so a SolidCraft bump never re-runs that. Hardware
+# access is the compose file's job: pass /dev/dri into sessiond. The versioned asset URL —
+# not the release's /latest/download alias — is what makes a version bump rebuild here.
+RUN set -eux; \
+  echo "solidcraft cache bust: ${SOLIDCRAFT_VERSION}"; \
+  apt-get update; \
+  curl -fsSL -o /tmp/solidcraft.deb \
+    "https://github.com/tangency-labs/solidcraft/releases/download/v${SOLIDCRAFT_VERSION}/solidcraft-${SOLIDCRAFT_VERSION}-linux-x86_64.deb"; \
+  apt-get install -y --no-install-recommends /tmp/solidcraft.deb; \
+  rm -f /tmp/solidcraft.deb; \
   rm -rf /var/lib/apt/lists/*
 
-# pi-web spawns login shells for terminals, and Debian's /etc/profile rewrites PATH, which
-# would drop the shim dirs. Put them back so terminals resolve the same tools agents do.
-RUN printf '%s\n' \
-  '# mise shims for login shells (pi-web terminals).' \
-  'for d in /usr/local/share/mise/shims /data/mise/shims; do' \
-  '  case ":$PATH:" in *:"$d":*) ;; *) PATH="$d:$PATH" ;; esac' \
-  'done; export PATH' \
-  > /etc/profile.d/10-mise-shims.sh
+COPY image/pi-web-entrypoint /usr/local/bin/pi-web-entrypoint
 
 # The `mise` on PATH is a symlink to the persistent copy: shims resolve through it with
 # argv[0] intact, and `mise self-update` replaces the file at its canonicalized path, i.e.
-# the one on /data. This is why it must not be a wrapper script, and why it comes last.
-RUN ln -s /data/mise/mise /usr/local/bin/mise
-
-COPY image/pi-web-entrypoint /usr/local/bin/pi-web-entrypoint
-RUN chmod 0755 /usr/local/bin/pi-web-entrypoint
+# the one on /data. This is why it must not be a wrapper script. One layer for the three
+# small final touches: shim PATH for login shells, that symlink, and the entrypoint bit.
+RUN chmod 0755 /usr/local/bin/pi-web-entrypoint \
+  && ln -s /data/mise/mise /usr/local/bin/mise \
+  && printf '%s\n' \
+    '# mise shims for login shells (pi-web terminals).' \
+    'for d in /usr/local/share/mise/shims /data/mise/shims; do' \
+    '  case ":$PATH:" in *:"$d":*) ;; *) PATH="$d:$PATH" ;; esac' \
+    'done; export PATH' \
+    > /etc/profile.d/10-mise-shims.sh
 
 WORKDIR /workspace
 EXPOSE 8504

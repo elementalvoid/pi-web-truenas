@@ -17,6 +17,8 @@ services:
     environment: *pi-web-environment
     volumes:
       - /mnt/skinner/apps-pi-web:/data
+    devices:
+      - /dev/dri:/dev/dri
     healthcheck:
       test: ["CMD-SHELL", "test -S /data/pi-web/sessiond.sock"]
       interval: 10s
@@ -55,6 +57,10 @@ x-notes: >-
 
   Tools come from mise (`node`, `python`, `go`, `rust`, `uv`, ...). `mise install`
   and `mise self-update` inside the app persist across restarts and redeploys.
+
+  `/dev/dri` (AMD/Intel iGPU) is passed into `sessiond`, so agent tools can use
+  VA-API / OpenCL hardware acceleration. If the host has no `/dev/dri`, remove
+  those two lines or the app will not start.
 
   Authenticate the agent under **Settings → Models** (provider API key), or run
   `pi` in a terminal. No authentication on the web UI: home-network use only.

@@ -27,6 +27,10 @@ standard tools.
 - **Playwright + Chromium** system-wide, so agent shells can drive a browser. Browsers
   live in `/opt/ms-playwright`; a runtime `playwright install` of a *different* version
   lands there too and is lost on container recreation.
+- **SolidCraft** (`solidcraft`, `solidcraft-cli`) from its GitHub release `.deb`, plus
+  `mesa-vulkan-drivers` for the Vulkan ICDs (radeon for the iGPU, lavapipe as a software
+  fallback). `build.sh` installs the latest release; `--build-arg SOLIDCRAFT_VERSION=x.y.z`
+  pins one. GPU access comes from `/dev/dri` passed into `sessiond` by `compose.yaml`.
 - (*) `jq` and friends come from mise, not apt, so they are the versions pinned there.
 
 ## Build

@@ -3,15 +3,15 @@
 #
 #   ./build.sh                 # CACHE_BUST from mise.toml, so rebuilds are cached but
 #                              # automatically re-run after you edit the toolchain.
-#                              # PI_WEB_VERSION and PI_CODING_AGENT_VERSION are resolved
-#                              # from npm, so a new pi-web or Pi SDK release re-runs just
-#                              # that layer.
+#                              # PI_WEB_VERSION, PI_CODING_AGENT_VERSION (npm) and
+#                              # SOLIDCRAFT_VERSION (GitHub release) are resolved from the
+#                              # network, so a new release re-runs just that layer.
 #   ./build.sh --refresh       # force a fresh CACHE_BUST (pick up newer `latest` tools)
 #   ./build.sh --no-cache      # extra args are passed straight to `docker build`
 #
 # Overrides: IMAGE=tag (default pi-web-truenas:latest), DOCKER="docker --config /etc/docker".
-# An explicit --build-arg PI_WEB_VERSION=... (or PI_CODING_AGENT_VERSION=...) skips that
-# package's npm lookup.
+# An explicit --build-arg PI_WEB_VERSION=... (or PI_CODING_AGENT_VERSION=...,
+# SOLIDCRAFT_VERSION=...) skips that package's lookup.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -47,8 +47,21 @@ for spec in PI_WEB_VERSION:@jmfederico/pi-web PI_CODING_AGENT_VERSION:@earendil-
   fi
 done
 
-echo "==> building $image (CACHE_BUST=$bust${pi_web_args[*]:+ ${pi_web_args[*]}})"
-"$docker_cmd" build --build-arg "CACHE_BUST=$bust" "${pi_web_args[@]}" -t "$image" "$@" .
+# SolidCraft ships a .deb per GitHub release (not npm): resolve the newest release tag.
+solidcraft_args=()
+if [[ " $* " != *"--build-arg SOLIDCRAFT_VERSION"* ]]; then
+  tag=$(curl -fsS --max-time 20 https://api.github.com/repos/tangency-labs/solidcraft/releases/latest 2>/dev/null \
+    | grep -oE '"tag_name": *"[^"]+"' | head -1 | cut -d'"' -f4) || true
+  if [ -n "${tag:-}" ]; then
+    solidcraft_args+=(--build-arg "SOLIDCRAFT_VERSION=${tag#v}")
+  else
+    echo "==> warning: could not resolve the latest SolidCraft release; using the ARG default" >&2
+  fi
+fi
+
+echo "==> building $image (CACHE_BUST=$bust${pi_web_args[*]:+ ${pi_web_args[*]}}${solidcraft_args[*]:+ ${solidcraft_args[*]}})"
+"$docker_cmd" build --build-arg "CACHE_BUST=$bust" \
+  "${pi_web_args[@]}" "${solidcraft_args[@]}" -t "$image" "$@" .
 
 echo
 echo "==> $image  $("$docker_cmd" image inspect "$image" --format '{{.Size}}' | awk '{printf "%.1f GB", $1/1073741824}')"
